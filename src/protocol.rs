@@ -20,6 +20,10 @@ pub enum Request {
         settle_ms: Option<u64>,
         timeout_ms: Option<u64>,
     },
+    Screenshot {
+        path: String,
+        scale: Option<u32>,
+    },
     Status,
     Stop,
 }

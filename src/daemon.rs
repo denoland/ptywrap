@@ -8,12 +8,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use nix::pty::{openpty, Winsize};
+use nix::pty::{Winsize, openpty};
 use nix::sys::signal;
 use nix::sys::wait::waitpid;
 use nix::unistd::{ForkResult, Pid};
 
 use crate::protocol::{Request, Response};
+use crate::render;
 
 const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 
@@ -263,127 +264,137 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<SessionState>>) -> bool {
 
     let mut should_stop = false;
 
-    let response =
-        match request {
-            // Wait needs to poll with the lock released between checks
-            Request::Wait {
-                settle_ms,
-                timeout_ms,
-            } => {
-                let settle = Duration::from_millis(settle_ms.unwrap_or(500));
-                let timeout = Duration::from_millis(timeout_ms.unwrap_or(30000));
-                let start = std::time::Instant::now();
-                let mut last_size = state.lock().unwrap().output_buf.len();
-                let mut last_change = std::time::Instant::now();
+    let response = match request {
+        // Wait needs to poll with the lock released between checks
+        Request::Wait {
+            settle_ms,
+            timeout_ms,
+        } => {
+            let settle = Duration::from_millis(settle_ms.unwrap_or(500));
+            let timeout = Duration::from_millis(timeout_ms.unwrap_or(30000));
+            let start = std::time::Instant::now();
+            let mut last_size = state.lock().unwrap().output_buf.len();
+            let mut last_change = std::time::Instant::now();
 
-                loop {
-                    thread::sleep(Duration::from_millis(50));
-                    let st = state.lock().unwrap();
-                    if !st.alive {
-                        break;
-                    }
-                    let current_size = st.output_buf.len();
-                    if current_size != last_size {
-                        last_size = current_size;
-                        last_change = std::time::Instant::now();
-                    }
-                    drop(st);
-                    if last_change.elapsed() >= settle {
-                        break;
-                    }
-                    if start.elapsed() >= timeout {
-                        break;
-                    }
+            loop {
+                thread::sleep(Duration::from_millis(50));
+                let st = state.lock().unwrap();
+                if !st.alive {
+                    break;
                 }
-                Response::ok(None)
+                let current_size = st.output_buf.len();
+                if current_size != last_size {
+                    last_size = current_size;
+                    last_change = std::time::Instant::now();
+                }
+                drop(st);
+                if last_change.elapsed() >= settle {
+                    break;
+                }
+                if start.elapsed() >= timeout {
+                    break;
+                }
             }
-            // All other requests hold the lock for the duration
-            other => {
-                let mut st = state.lock().unwrap();
-                match other {
-                    Request::Write { data } => {
-                        let bytes = data.as_bytes();
-                        let n = unsafe {
-                            libc::write(st.pty_master, bytes.as_ptr() as *const _, bytes.len())
-                        };
-                        if n < 0 {
-                            Response::error("Failed to write to PTY")
-                        } else {
-                            Response::ok(None)
-                        }
-                    }
-                    Request::View { color } => {
-                        let screen = st.parser.screen();
-                        let cursor = screen.cursor_position();
-                        let (rows, cols) = screen.size();
-                        let header =
-                            format!("[{}x{} cursor=({},{})]", cols, rows, cursor.0, cursor.1);
-                        let contents = if color {
-                            String::from_utf8_lossy(&screen.contents_formatted()).to_string()
-                        } else {
-                            screen.contents()
-                        };
-                        Response::ok(Some(format!("{}\n{}", header, contents)))
-                    }
-                    Request::Output { tail } => {
-                        let buf: Vec<u8> = st.output_buf.iter().copied().collect();
-                        let text = match tail {
-                            Some(n) => {
-                                let mut count = 0;
-                                let mut pos = buf.len();
-                                for i in (0..buf.len()).rev() {
-                                    if buf[i] == b'\n' {
-                                        count += 1;
-                                        if count >= n {
-                                            pos = i + 1;
-                                            break;
-                                        }
-                                    }
-                                }
-                                String::from_utf8_lossy(&buf[pos..]).to_string()
-                            }
-                            None => String::from_utf8_lossy(&buf).to_string(),
-                        };
-                        Response::ok(Some(text))
-                    }
-                    Request::Resize { cols, rows } => {
-                        let ws = libc::winsize {
-                            ws_row: rows,
-                            ws_col: cols,
-                            ws_xpixel: 0,
-                            ws_ypixel: 0,
-                        };
-                        let ret = unsafe { libc::ioctl(st.pty_master, libc::TIOCSWINSZ, &ws) };
-                        if ret < 0 {
-                            Response::error("Failed to resize PTY")
-                        } else {
-                            st.parser.set_size(rows, cols);
-                            Response::ok(None)
-                        }
-                    }
-                    Request::Status => {
-                        let screen = st.parser.screen();
-                        let (rows, cols) = screen.size();
-                        let title = screen.title();
-                        let cursor = screen.cursor_position();
-                        let info =
-                            format!(
-                        "alive: {}\nsize: {}x{}\ncursor: ({},{})\ntitle: {}\noutput_bytes: {}",
-                        st.alive, cols, rows, cursor.0, cursor.1, title, st.output_buf.len()
-                    );
-                        Response::ok(Some(info))
-                    }
-                    Request::Stop => {
-                        let _ = signal::kill(st.child_pid, signal::Signal::SIGHUP);
-                        let _ = signal::kill(st.child_pid, signal::Signal::SIGTERM);
-                        st.alive = false;
-                        should_stop = true;
+            Response::ok(None)
+        }
+        // All other requests hold the lock for the duration
+        other => {
+            let mut st = state.lock().unwrap();
+            match other {
+                Request::Write { data } => {
+                    let bytes = data.as_bytes();
+                    let n = unsafe {
+                        libc::write(st.pty_master, bytes.as_ptr() as *const _, bytes.len())
+                    };
+                    if n < 0 {
+                        Response::error("Failed to write to PTY")
+                    } else {
                         Response::ok(None)
                     }
-                    Request::Wait { .. } => unreachable!(),
                 }
+                Request::View { color } => {
+                    let screen = st.parser.screen();
+                    let cursor = screen.cursor_position();
+                    let (rows, cols) = screen.size();
+                    let header = format!("[{}x{} cursor=({},{})]", cols, rows, cursor.0, cursor.1);
+                    let contents = if color {
+                        String::from_utf8_lossy(&screen.contents_formatted()).to_string()
+                    } else {
+                        screen.contents()
+                    };
+                    Response::ok(Some(format!("{}\n{}", header, contents)))
+                }
+                Request::Output { tail } => {
+                    let buf: Vec<u8> = st.output_buf.iter().copied().collect();
+                    let text = match tail {
+                        Some(n) => {
+                            let mut count = 0;
+                            let mut pos = buf.len();
+                            for i in (0..buf.len()).rev() {
+                                if buf[i] == b'\n' {
+                                    count += 1;
+                                    if count >= n {
+                                        pos = i + 1;
+                                        break;
+                                    }
+                                }
+                            }
+                            String::from_utf8_lossy(&buf[pos..]).to_string()
+                        }
+                        None => String::from_utf8_lossy(&buf).to_string(),
+                    };
+                    Response::ok(Some(text))
+                }
+                Request::Resize { cols, rows } => {
+                    let ws = libc::winsize {
+                        ws_row: rows,
+                        ws_col: cols,
+                        ws_xpixel: 0,
+                        ws_ypixel: 0,
+                    };
+                    let ret = unsafe { libc::ioctl(st.pty_master, libc::TIOCSWINSZ, &ws) };
+                    if ret < 0 {
+                        Response::error("Failed to resize PTY")
+                    } else {
+                        st.parser.set_size(rows, cols);
+                        Response::ok(None)
+                    }
+                }
+                Request::Status => {
+                    let screen = st.parser.screen();
+                    let (rows, cols) = screen.size();
+                    let title = screen.title();
+                    let cursor = screen.cursor_position();
+                    let info = format!(
+                        "alive: {}\nsize: {}x{}\ncursor: ({},{})\ntitle: {}\noutput_bytes: {}",
+                        st.alive,
+                        cols,
+                        rows,
+                        cursor.0,
+                        cursor.1,
+                        title,
+                        st.output_buf.len()
+                    );
+                    Response::ok(Some(info))
+                }
+                Request::Screenshot { path, scale } => {
+                    let img = render::render_screenshot(st.parser.screen(), scale.unwrap_or(2));
+                    match img.save(&path) {
+                        Ok(()) => Response::ok(Some(format!("Screenshot saved to {}", path))),
+                        Err(e) => Response::error(format!("Failed to save screenshot: {}", e)),
+                    }
+                }
+                Request::Stop => {
+                    let _ = signal::kill(st.child_pid, signal::Signal::SIGHUP);
+                    let _ = signal::kill(st.child_pid, signal::Signal::SIGTERM);
+                    st.alive = false;
+                    should_stop = true;
+                    Response::ok(None)
+                }
+                Request::Wait { .. } => unreachable!(),
             }
-        };
+        }
+    };
 
     let _ = serde_json::to_writer(&mut writer, &response);
     should_stop

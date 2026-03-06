@@ -6,6 +6,7 @@ mod client;
 mod daemon;
 mod keys;
 mod protocol;
+mod render;
 
 use protocol::Request;
 
@@ -84,6 +85,20 @@ enum Command {
         cols: u16,
         /// New height
         rows: u16,
+    },
+    /// Take a screenshot of the terminal as PNG
+    Screenshot {
+        /// Output file path
+        path: String,
+        /// Scale factor (default 2 = 16x16 per char)
+        #[arg(long, default_value_t = 2)]
+        scale: u32,
+        /// Wait for output to settle first
+        #[arg(long)]
+        wait: bool,
+        /// Settle time in ms (default 500)
+        #[arg(long)]
+        settle: Option<u64>,
     },
     /// Show session status
     Status,
@@ -194,6 +209,29 @@ fn main() -> anyhow::Result<()> {
                 }
                 Command::Resize { cols, rows } => {
                     send_and_print(&socket_path, &Request::Resize { cols, rows })?;
+                }
+                Command::Screenshot {
+                    path,
+                    scale,
+                    wait,
+                    settle,
+                } => {
+                    if wait || settle.is_some() {
+                        send_and_print(
+                            &socket_path,
+                            &Request::Wait {
+                                settle_ms: Some(settle.unwrap_or(500)),
+                                timeout_ms: Some(30000),
+                            },
+                        )?;
+                    }
+                    send_and_print(
+                        &socket_path,
+                        &Request::Screenshot {
+                            path,
+                            scale: Some(scale),
+                        },
+                    )?;
                 }
                 Command::Status => {
                     send_and_print(&socket_path, &Request::Status)?;
