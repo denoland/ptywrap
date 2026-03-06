@@ -99,12 +99,12 @@ pub fn key_to_bytes(name: &str) -> Option<Vec<u8>> {
             let stripped = lower
                 .strip_prefix("ctrl-")
                 .or_else(|| lower.strip_prefix("c-"));
-            if let Some(ch) = stripped {
-                if ch.len() == 1 {
-                    let c = ch.as_bytes()[0];
-                    if c.is_ascii_lowercase() {
-                        return Some(vec![c - b'a' + 1]);
-                    }
+            if let Some(ch) = stripped
+                && ch.len() == 1
+            {
+                let c = ch.as_bytes()[0];
+                if c.is_ascii_lowercase() {
+                    return Some(vec![c - b'a' + 1]);
                 }
             }
             None
