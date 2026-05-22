@@ -73,12 +73,19 @@ enum Command {
     /// COMMAND inside it. The daemon survives the child's exit so its final
     /// terminal state can still be inspected; use `stop` to terminate it.
     ///
+    /// `TERM` is set to `xterm-256color` for the child by default (the
+    /// in-process emulator is xterm-ish, and this lets curses programs --
+    /// vim/htop/less -- run directly without an `env TERM=...` wrapper).
+    /// Override with `--term`.
+    ///
     /// Fails if a session with the same name is already running. Place
     /// COMMAND and its arguments after `--` so flags meant for the child
     /// aren't consumed by ptywrap.
     ///
-    /// Example:
+    /// Examples:
+    ///   ptywrap -s s start -- bash
     ///   ptywrap -s s start --cols 120 --rows 40 -- bash -l
+    ///   ptywrap -s s start --term screen-256color -- bash
     #[command(long_about, verbatim_doc_comment)]
     Start {
         /// Terminal width in columns.
@@ -87,6 +94,9 @@ enum Command {
         /// Terminal height in rows.
         #[arg(long, default_value_t = 24)]
         rows: u16,
+        /// Value of the TERM environment variable for the child.
+        #[arg(long, default_value = "xterm-256color")]
+        term: String,
         /// Command and arguments to run, after `--`.
         #[arg(last = true, required = true)]
         command: Vec<String>,
@@ -336,10 +346,11 @@ fn main() -> anyhow::Result<()> {
         Command::Start {
             cols,
             rows,
+            term,
             command,
         } => {
             let session = require_session(cli.session)?;
-            daemon::start(&session, &command, cols, rows, &dir)?;
+            daemon::start(&session, &command, cols, rows, &term, &dir)?;
         }
         cmd => {
             let session = require_session(cli.session)?;

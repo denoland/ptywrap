@@ -43,6 +43,7 @@ pub fn start(
     command: &[String],
     cols: u16,
     rows: u16,
+    term: &str,
     runtime_dir: &Path,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(runtime_dir)?;
@@ -71,7 +72,7 @@ pub fn start(
             anyhow::bail!("Timed out waiting for session '{}' to start", session_name);
         }
         ForkResult::Child => {
-            let result = daemonize_and_run(&socket_path, &pid_path, command, cols, rows);
+            let result = daemonize_and_run(&socket_path, &pid_path, command, cols, rows, term);
 
             let _ = std::fs::remove_file(&socket_path);
             let _ = std::fs::remove_file(&pid_path);
@@ -90,6 +91,7 @@ fn daemonize_and_run(
     command: &[String],
     cols: u16,
     rows: u16,
+    term: &str,
 ) -> anyhow::Result<()> {
     nix::unistd::setsid()?;
 
@@ -140,6 +142,12 @@ fn daemonize_and_run(
 
             // Set controlling terminal
             unsafe { libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) };
+
+            // Setting TERM here means curses programs (vim/htop/less) can
+            // be run directly without an `env TERM=... bash` wrapper.
+            unsafe {
+                std::env::set_var("TERM", term);
+            }
 
             let cmd = CString::new(command[0].as_str())?;
             let args: Vec<CString> = command

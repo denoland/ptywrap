@@ -27,7 +27,7 @@ Requires Rust 1.70+. Works on macOS and Linux.
 ## Quick start
 
 ```sh
-# Start a session running bash
+# Start a session running bash (TERM defaults to xterm-256color)
 ptywrap -s mysession start -- bash
 
 # Run a command (-e enables \n interpretation; alternative: send-key Enter)
@@ -36,8 +36,8 @@ ptywrap -s mysession write -e 'ls -la\n'
 # View the terminal screen (waits for output to settle first)
 ptywrap -s mysession view --wait
 
-# Launch an interactive program
-ptywrap -s mysession write -e 'htop\n'
+# Launch an interactive program directly (no `env TERM=...` needed)
+ptywrap -s mysession start -- htop
 ptywrap -s mysession view --wait
 
 # Send special keys
@@ -54,7 +54,7 @@ ptywrap -s mysession stop
 ### Session management
 
 ```sh
-ptywrap -s NAME start [--cols 80] [--rows 24] -- COMMAND [ARGS...]
+ptywrap -s NAME start [--cols 80] [--rows 24] [--term xterm-256color] -- COMMAND [ARGS...]
 ptywrap -s NAME stop
 ptywrap -s NAME status
 ptywrap list
