@@ -1,3 +1,4 @@
+use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -35,10 +36,14 @@ enum Command {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
-    /// Write text to the PTY (interprets \\n, \\t, \\x1b, etc.)
+    /// Write text to the PTY. Reads stdin when DATA is omitted or '-'.
+    /// Bytes are sent literally; use -e/--escaped to interpret \\n, \\xNN, etc.
     Write {
-        /// Text to write
-        data: String,
+        /// Text to write. Omit or pass `-` to read from stdin.
+        data: Option<String>,
+        /// Interpret C-style escape sequences in DATA.
+        #[arg(short = 'e', long = "escaped")]
+        escaped: bool,
     },
     /// Send named keys to the PTY (e.g. Enter, Tab, Up, Ctrl-C)
     SendKey {
@@ -113,6 +118,12 @@ fn runtime_dir() -> anyhow::Result<PathBuf> {
     Ok(PathBuf::from(home).join(".ptywrap"))
 }
 
+fn read_stdin_bytes() -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    std::io::stdin().read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
 fn require_session(session: Option<String>) -> anyhow::Result<String> {
     session.ok_or_else(|| anyhow::anyhow!("--session is required for this command"))
 }
@@ -152,8 +163,29 @@ fn main() -> anyhow::Result<()> {
             let socket_path = dir.join(format!("{}.sock", session));
 
             match cmd {
-                Command::Write { data } => {
-                    let bytes = keys::interpret_escapes(&data);
+                Command::Write { data, escaped } => {
+                    let raw: Vec<u8> = match data.as_deref() {
+                        Some("-") => read_stdin_bytes()?,
+                        Some(s) => s.as_bytes().to_vec(),
+                        None => {
+                            if std::io::stdin().is_terminal() {
+                                anyhow::bail!(
+                                    "no DATA argument and stdin is a TTY; pass text as an argument, pipe to stdin, or use '-'"
+                                );
+                            }
+                            read_stdin_bytes()?
+                        }
+                    };
+                    let bytes = if escaped {
+                        let s = std::str::from_utf8(&raw).map_err(|_| {
+                            anyhow::anyhow!(
+                                "--escaped requires UTF-8 input; got non-UTF-8 bytes"
+                            )
+                        })?;
+                        keys::interpret_escapes(s)
+                    } else {
+                        raw
+                    };
                     let data_str = String::from_utf8(bytes)
                         .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
                     send_and_print(&socket_path, &Request::Write { data: data_str })?;
