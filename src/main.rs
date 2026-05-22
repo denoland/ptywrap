@@ -30,7 +30,7 @@ Typical workflow:
 
 Input shortcuts:
   cat foo.txt | ptywrap -s s write  # pipe a file's contents into the PTY
-  echo done    | ptywrap -s s write # read stdin when DATA is omitted or '-'
+  echo done   | ptywrap -s s write  # read stdin when DATA is omitted or '-'
   ptywrap -s s write -e 'hi\\n'      # -e/--escaped enables backslash
                                     #   escapes: \\n \\r \\t \\xHH \\uHHHH ...
   ptywrap -s s write -- --escaped   # use `--` to send DATA that starts
@@ -275,6 +275,9 @@ enum Command {
     /// specific session.
     #[command(long_about, verbatim_doc_comment)]
     List,
+
+    /// Print ptywrap's version.
+    Version,
 }
 
 fn runtime_dir() -> anyhow::Result<PathBuf> {
@@ -306,11 +309,27 @@ fn send_and_print(socket_path: &std::path::Path, request: &Request) -> anyhow::R
     Ok(())
 }
 
+fn print_version() {
+    println!("ptywrap {}", env!("CARGO_PKG_VERSION"));
+}
+
 fn main() -> anyhow::Result<()> {
+    // Undocumented `-v`/`-V`/`--version` aliases of the `version`
+    // subcommand. Pre-parsed so they don't need a visible clap arg.
+    if let Some(arg) = std::env::args().nth(1).as_deref()
+        && matches!(arg, "-v" | "-V" | "--version")
+    {
+        print_version();
+        return Ok(());
+    }
+
     let cli = Cli::parse();
     let dir = runtime_dir()?;
 
     match cli.command {
+        Command::Version => {
+            print_version();
+        }
         Command::List => {
             list_sessions(&dir)?;
         }
