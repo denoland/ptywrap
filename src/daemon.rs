@@ -340,7 +340,18 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<SessionState>>) -> bool {
                     let screen = st.parser.screen();
                     let cursor = screen.cursor_position();
                     let (rows, cols) = screen.size();
-                    let header = format!("[{}x{} cursor=({},{})]", cols, rows, cursor.0, cursor.1);
+                    let exit_marker = if !st.alive {
+                        match &st.exit_status {
+                            Some(s) => format!(" {}", s),
+                            None => " exited".to_string(),
+                        }
+                    } else {
+                        String::new()
+                    };
+                    let header = format!(
+                        "[{}x{} cursor=({},{}){}]",
+                        cols, rows, cursor.0, cursor.1, exit_marker
+                    );
                     let contents = if color {
                         String::from_utf8_lossy(&screen.contents_formatted()).to_string()
                     } else {

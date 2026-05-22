@@ -460,11 +460,7 @@ fn list_sessions(dir: &std::path::Path) -> anyhow::Result<()> {
         let name = name.to_string_lossy();
         if let Some(session) = name.strip_suffix(".sock") {
             let socket_path = entry.path();
-            let status = if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
-                "running"
-            } else {
-                "stale"
-            };
+            let status = session_status(&socket_path);
             println!("{}\t{}", session, status);
             found = true;
         }
@@ -475,4 +471,22 @@ fn list_sessions(dir: &std::path::Path) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Ask the daemon for its session status and reduce it to a one-word
+/// (or short-phrase) label suitable for the `list` output.
+fn session_status(socket_path: &std::path::Path) -> String {
+    match client::send(socket_path, &Request::Status) {
+        Ok(resp) if resp.success => {
+            let data = resp.data.unwrap_or_default();
+            if data.lines().any(|l| l.trim() == "alive: true") {
+                return "running".to_string();
+            }
+            data.lines()
+                .find_map(|l| l.strip_prefix("exit_status: "))
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "exited".to_string())
+        }
+        _ => "stale".to_string(),
+    }
 }
