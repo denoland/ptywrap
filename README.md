@@ -30,14 +30,14 @@ Requires Rust 1.70+. Works on macOS and Linux.
 # Start a session running bash
 ptywrap -s mysession start -- bash
 
-# Run a command
-ptywrap -s mysession write 'ls -la\n'
+# Run a command (-e enables \n interpretation; alternative: send-key Enter)
+ptywrap -s mysession write -e 'ls -la\n'
 
 # View the terminal screen (waits for output to settle first)
 ptywrap -s mysession view --wait
 
 # Launch an interactive program
-ptywrap -s mysession write 'htop\n'
+ptywrap -s mysession write -e 'htop\n'
 ptywrap -s mysession view --wait
 
 # Send special keys
@@ -63,16 +63,37 @@ ptywrap list
 ### Input
 
 ```sh
-# Write text with C-style escape sequences
-ptywrap -s NAME write 'echo hello\n'
+# Write text literally (bytes sent as-is, no escape interpretation)
+ptywrap -s NAME write 'echo hello'
 
-# Supported escapes: \n \r \t \\ \e (ESC) \0 \a (BEL) \xNN (hex byte)
+# Pipe text from stdin (no DATA argument, or pass '-')
+echo 'echo hello' | ptywrap -s NAME write
+cat script.txt    | ptywrap -s NAME write
+
+# Send DATA that starts with a dash: put `--` first
+ptywrap -s NAME write -- --escaped
+
+# Interpret bash/zsh-style escape sequences with -e/--escaped
+ptywrap -s NAME write -e 'echo hello\n'
+ptywrap -s NAME write -e 'snowman: ☃\n'
+
+# Supported escapes (with -e):
+#   \n \r \t \a \b \f \v          control bytes
+#   \e \E                          ESC (0x1B)
+#   \\                             literal backslash
+#   \0                             NUL byte
+#   \xHH                           one raw byte (1-2 hex)
+#   \uHHHH \UHHHHHHHH              Unicode codepoint (UTF-8)
 
 # Send named keys
 ptywrap -s NAME send-key Enter Tab Escape Up Down Left Right
 ptywrap -s NAME send-key Ctrl-C Ctrl-D Ctrl-Z Ctrl-L
+ptywrap -s NAME send-key ^C ^D ^Z ^L           # caret notation also works
 ptywrap -s NAME send-key Home End PageUp PageDown Backspace Delete
 ptywrap -s NAME send-key F1 F2 ... F12
+
+# Single-character arguments are sent as-is (letters, digits, punctuation)
+ptywrap -s NAME send-key h i Space w o r l d Enter
 ```
 
 Multiple keys can be sent in one call: `send-key Up Up Enter`
@@ -109,8 +130,11 @@ Each session runs as an independent daemon process:
   and a 2MB ring buffer of raw output
 - Communication happens via a Unix domain socket at `~/.ptywrap/SESSION.sock`
 - The CLI client connects, sends a JSON request, and reads the response
-- `stop` sends SIGHUP+SIGTERM to the child process (SIGKILL as fallback)
-- When the child exits, the daemon cleans up its socket and PID files
+- The daemon stays alive AFTER the child exits, so the final screen,
+  output buffer, and exit status remain queryable; `status` reports
+  the exit code (or signal)
+- `stop` sends SIGHUP+SIGTERM to the child (SIGKILL as fallback), then
+  cleans up the socket and PID files and exits
 
 No central daemon process is needed. Sessions are fully independent.
 
@@ -123,7 +147,7 @@ An LLM can use ptywrap like this:
 $ ptywrap -s work start -- bash
 
 # Run a command and see the result
-$ ptywrap -s work write 'git status\n'
+$ ptywrap -s work write -e 'git status\n'
 $ ptywrap -s work view --wait
 [80x24 cursor=(8,2)]
 On branch main
@@ -131,16 +155,16 @@ Changes not staged for commit:
   modified:   src/main.rs
 
 # Edit a file with vim
-$ ptywrap -s work write 'vim src/main.rs\n'
+$ ptywrap -s work write -e 'vim src/main.rs\n'
 $ ptywrap -s work view --wait
 [80x24 cursor=(0,0)]
 use std::path::PathBuf;
 ...
 
 # Navigate and edit
-$ ptywrap -s work write '/fn main\n'     # search
-$ ptywrap -s work write 'olet x = 42;\e' # insert line, back to normal mode
-$ ptywrap -s work write ':wq\n'           # save and quit
+$ ptywrap -s work write -e '/fn main\n'     # search
+$ ptywrap -s work write -e 'olet x = 42;\e' # insert line, back to normal mode
+$ ptywrap -s work write -e ':wq\n'          # save and quit
 $ ptywrap -s work view --wait
 ```
 
