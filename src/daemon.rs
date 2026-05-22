@@ -13,6 +13,9 @@ use nix::sys::signal;
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, Pid};
 
+use std::io::Read as _;
+use std::os::fd::FromRawFd;
+
 use crate::protocol::{Request, Response};
 use crate::render;
 
@@ -60,19 +63,68 @@ pub fn start(
         let _ = std::fs::remove_file(&pid_path);
     }
 
+    // Status pipe: the daemon (and the exec'd child) writes a short error
+    // string here if startup fails; on success it closes the write end
+    // silently. The parent (us) reads until EOF -- non-empty data means
+    // startup failed and we should clean up.
+    //
+    // CLOEXEC on both ends means the eventual execvp'd child auto-closes
+    // the write end on success; on failure the child explicitly writes
+    // its errno before exiting. (libc::pipe + fcntl, since pipe2 isn't
+    // available on macOS.)
+    let (status_r, status_w) = {
+        let mut fds = [0i32; 2];
+        let r = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        if r != 0 {
+            anyhow::bail!("pipe(2): {}", std::io::Error::last_os_error());
+        }
+        unsafe {
+            libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+        (fds[0], fds[1])
+    };
+
     match unsafe { nix::unistd::fork() }? {
         ForkResult::Parent { child } => {
-            for _ in 0..100 {
-                if socket_path.exists() {
-                    eprintln!("Session '{}' started (daemon pid {})", session_name, child);
-                    return Ok(());
-                }
-                thread::sleep(Duration::from_millis(50));
+            unsafe { libc::close(status_w) }; // parent doesn't write
+            let mut rfd = unsafe { std::fs::File::from_raw_fd(status_r) };
+            let mut err_buf = Vec::new();
+            rfd.read_to_end(&mut err_buf).ok();
+
+            if !err_buf.is_empty() {
+                // Daemon failed to start. Make sure it's actually dead and
+                // that socket/pid files don't linger.
+                let _ = signal::kill(child, signal::Signal::SIGTERM);
+                let _ = waitpid(child, None);
+                let _ = std::fs::remove_file(&socket_path);
+                let _ = std::fs::remove_file(&pid_path);
+                let msg = String::from_utf8_lossy(&err_buf).trim().to_string();
+                anyhow::bail!("Failed to start session '{}': {}", session_name, msg);
             }
-            anyhow::bail!("Timed out waiting for session '{}' to start", session_name);
+            eprintln!("Session '{}' started (daemon pid {})", session_name, child);
+            Ok(())
         }
         ForkResult::Child => {
-            let result = daemonize_and_run(&socket_path, &pid_path, command, cols, rows, term);
+            unsafe { libc::close(status_r) }; // daemon doesn't read
+            let status_w_raw = status_w;
+            let result = daemonize_and_run(
+                &socket_path,
+                &pid_path,
+                command,
+                cols,
+                rows,
+                term,
+                status_w_raw,
+            );
+
+            // On success, run_session has already closed status_w_raw to
+            // signal the parent. On error, status_w_raw is still open (we
+            // close before any fallible path in run_session) -- write the
+            // error message; process exit will close the fd.
+            if let Err(e) = &result {
+                write_status_err(status_w_raw, &format!("{}", e));
+            }
 
             let _ = std::fs::remove_file(&socket_path);
             let _ = std::fs::remove_file(&pid_path);
@@ -85,6 +137,16 @@ pub fn start(
     }
 }
 
+/// Best-effort write of an error message to the status pipe so the
+/// `ptywrap start` parent can surface it. Failures are intentionally
+/// ignored: at this point we're already on an error path and exiting.
+fn write_status_err(fd: i32, msg: &str) {
+    let bytes = msg.as_bytes();
+    unsafe {
+        let _ = libc::write(fd, bytes.as_ptr() as *const _, bytes.len());
+    }
+}
+
 fn daemonize_and_run(
     socket_path: &Path,
     pid_path: &Path,
@@ -92,6 +154,7 @@ fn daemonize_and_run(
     cols: u16,
     rows: u16,
     term: &str,
+    status_w_fd: i32,
 ) -> anyhow::Result<()> {
     nix::unistd::setsid()?;
 
@@ -125,7 +188,7 @@ fn daemonize_and_run(
     match unsafe { nix::unistd::fork() }? {
         ForkResult::Parent { child } => {
             unsafe { libc::close(slave_fd) };
-            run_session(socket_path, master_fd, child, cols, rows)
+            run_session(socket_path, master_fd, child, cols, rows, status_w_fd)
         }
         ForkResult::Child => {
             unsafe { libc::close(master_fd) };
@@ -144,7 +207,9 @@ fn daemonize_and_run(
             unsafe { libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) };
 
             // Setting TERM here means curses programs (vim/htop/less) can
-            // be run directly without an `env TERM=... bash` wrapper.
+            // be run directly without `env TERM=... bash` indirection.
+            // CARGO_PKG_VERSION pollution etc. is fine -- the child sees
+            // whatever environment we inherited plus this override.
             unsafe {
                 std::env::set_var("TERM", term);
             }
@@ -154,9 +219,18 @@ fn daemonize_and_run(
                 .iter()
                 .map(|a| CString::new(a.as_str()).unwrap())
                 .collect();
-            nix::unistd::execvp(&cmd, &args)?;
-
-            unreachable!()
+            // On successful exec, CLOEXEC closes status_w_fd, which lets
+            // the `ptywrap start` parent's read return EOF. On failure we
+            // explicitly write the errno before exiting so the parent
+            // gets a useful error.
+            match nix::unistd::execvp(&cmd, &args) {
+                Ok(_) => unreachable!(),
+                Err(errno) => {
+                    write_status_err(status_w_fd, &format!("exec {:?}: {}", command[0], errno));
+                    unsafe { libc::close(status_w_fd) };
+                    std::process::exit(127);
+                }
+            }
         }
     }
 }
@@ -167,6 +241,7 @@ fn run_session(
     child_pid: Pid,
     cols: u16,
     rows: u16,
+    status_w_fd: i32,
 ) -> anyhow::Result<()> {
     let state = Arc::new(Mutex::new(SessionState {
         parser: vt100::Parser::new(rows, cols, 0),
@@ -234,6 +309,12 @@ fn run_session(
     // buffer, and exit status; only an explicit `stop` ends the daemon.
     let listener = UnixListener::bind(socket_path)?;
     listener.set_nonblocking(true)?;
+
+    // Startup is past the point where it can fail. Close our copy of the
+    // status pipe so the `ptywrap start` parent sees EOF (success). The
+    // exec'd child still holds the other copy with CLOEXEC, which closes
+    // on successful exec or stays open until the child writes an error.
+    unsafe { libc::close(status_w_fd) };
 
     let mut should_stop = false;
     while !should_stop {

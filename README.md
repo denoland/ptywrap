@@ -61,6 +61,9 @@ ptywrap -s NAME status
 ptywrap list
 ```
 
+`start` exits non-zero (with the underlying error) if COMMAND fails to
+exec — e.g. binary not found.
+
 ### Input
 
 ```sh
