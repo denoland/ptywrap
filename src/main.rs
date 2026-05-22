@@ -361,9 +361,7 @@ fn main() -> anyhow::Result<()> {
                     };
                     let bytes = if escaped {
                         let s = std::str::from_utf8(&raw).map_err(|_| {
-                            anyhow::anyhow!(
-                                "--escaped requires UTF-8 input; got non-UTF-8 bytes"
-                            )
+                            anyhow::anyhow!("--escaped requires UTF-8 input; got non-UTF-8 bytes")
                         })?;
                         keys::interpret_escapes(s)
                     } else {

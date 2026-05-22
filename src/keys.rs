@@ -59,9 +59,7 @@ pub fn interpret_escapes(s: &str) -> Vec<u8> {
                 b'x' => {
                     i += 2;
                     let mut hex = String::new();
-                    while hex.len() < 2
-                        && i < bytes.len()
-                        && (bytes[i] as char).is_ascii_hexdigit()
+                    while hex.len() < 2 && i < bytes.len() && (bytes[i] as char).is_ascii_hexdigit()
                     {
                         hex.push(bytes[i] as char);
                         i += 1;

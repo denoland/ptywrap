@@ -321,9 +321,7 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<SessionState>>) -> bool {
             match other {
                 Request::Write { data } => {
                     if !st.alive {
-                        Response::error(
-                            "Session is no longer alive; child process has exited",
-                        )
+                        Response::error("Session is no longer alive; child process has exited")
                     } else {
                         let bytes = data.as_bytes();
                         let n = unsafe {
@@ -382,9 +380,7 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<SessionState>>) -> bool {
                 }
                 Request::Resize { cols, rows } => {
                     if !st.alive {
-                        Response::error(
-                            "Session is no longer alive; child process has exited",
-                        )
+                        Response::error("Session is no longer alive; child process has exited")
                     } else {
                         let ws = libc::winsize {
                             ws_row: rows,
