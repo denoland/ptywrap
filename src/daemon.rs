@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use nix::pty::{Winsize, openpty};
 use nix::sys::signal;
-use nix::sys::wait::waitpid;
+use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, Pid};
 
 use crate::protocol::{Request, Response};
@@ -24,6 +24,18 @@ struct SessionState {
     pty_master: i32,
     child_pid: Pid,
     alive: bool,
+    exit_status: Option<String>,
+}
+
+fn format_wait_status(status: &WaitStatus) -> String {
+    match status {
+        WaitStatus::Exited(_, code) => format!("exited with code {}", code),
+        WaitStatus::Signaled(_, sig, core) => {
+            let core = if *core { " (core dumped)" } else { "" };
+            format!("killed by signal {}{}", sig, core)
+        }
+        other => format!("{:?}", other),
+    }
 }
 
 pub fn start(
@@ -154,9 +166,11 @@ fn run_session(
         pty_master: master_fd,
         child_pid,
         alive: true,
+        exit_status: None,
     }));
 
-    // Thread: read PTY master output (uses poll so it can be interrupted)
+    // Thread: read PTY master output (uses poll so it can be interrupted by
+    // closing the master fd).
     let state_clone = Arc::clone(&state);
     let reader_thread = thread::spawn(move || {
         let mut buf = [0u8; 8192];
@@ -166,26 +180,19 @@ fn run_session(
                 events: libc::POLLIN,
                 revents: 0,
             }];
-            let ret = unsafe { libc::poll(fds.as_mut_ptr(), 1, 200) };
+            let ret = unsafe { libc::poll(fds.as_mut_ptr(), 1, 1000) };
             if ret < 0 {
-                state_clone.lock().unwrap().alive = false;
                 break;
             }
             if ret == 0 {
-                // Timeout -- check if we should exit
-                if !state_clone.lock().unwrap().alive {
-                    break;
-                }
                 continue;
             }
             if fds[0].revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
-                state_clone.lock().unwrap().alive = false;
                 break;
             }
             if fds[0].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
                 let n = unsafe { libc::read(master_fd, buf.as_mut_ptr() as *mut _, buf.len()) };
                 if n <= 0 {
-                    state_clone.lock().unwrap().alive = false;
                     break;
                 }
                 let data = &buf[..n as usize];
@@ -201,40 +208,54 @@ fn run_session(
         }
     });
 
-    // Main thread: accept client connections
+    // Thread: wait for the child to exit and record its status. This runs
+    // independently of the reader so we can know the child has gone away even
+    // if there's still buffered PTY output being drained.
+    let reaper_state = Arc::clone(&state);
+    let reaper_thread = thread::spawn(move || {
+        let result = waitpid(child_pid, None);
+        let mut st = reaper_state.lock().unwrap();
+        st.alive = false;
+        if let Ok(status) = result {
+            st.exit_status = Some(format_wait_status(&status));
+        }
+    });
+
+    // Main thread: accept client connections. The daemon keeps running after
+    // the child exits so callers can still query the final screen, output
+    // buffer, and exit status; only an explicit `stop` ends the daemon.
     let listener = UnixListener::bind(socket_path)?;
     listener.set_nonblocking(true)?;
 
-    loop {
+    let mut should_stop = false;
+    while !should_stop {
         match listener.accept() {
             Ok((stream, _)) => {
                 if handle_client(stream, &state) {
-                    break;
+                    should_stop = true;
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if !state.lock().unwrap().alive {
-                    break;
-                }
                 thread::sleep(Duration::from_millis(50));
             }
             Err(_) => break,
         }
     }
 
-    // Close master fd -- triggers SIGHUP on the slave side
-    unsafe { libc::close(master_fd) };
-
-    // Wait for reader thread to notice and exit
-    let _ = reader_thread.join();
-
-    // Wait for child, SIGKILL if it doesn't exit promptly
-    if let Ok(nix::sys::wait::WaitStatus::StillAlive) =
-        waitpid(child_pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG))
-    {
-        let _ = signal::kill(child_pid, signal::Signal::SIGKILL);
-        let _ = waitpid(child_pid, None);
+    // Give the child a moment to exit after Stop signalled it; if it's still
+    // running, force SIGKILL so the reaper can complete.
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    while !reaper_thread.is_finished() && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
     }
+    if !reaper_thread.is_finished() {
+        let _ = signal::kill(child_pid, signal::Signal::SIGKILL);
+    }
+    let _ = reaper_thread.join();
+
+    // Closing master triggers POLLNVAL on the reader's poll.
+    unsafe { libc::close(master_fd) };
+    let _ = reader_thread.join();
 
     Ok(())
 }
@@ -265,7 +286,9 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<SessionState>>) -> bool {
     let mut should_stop = false;
 
     let response = match request {
-        // Wait needs to poll with the lock released between checks
+        // Wait needs to poll with the lock released between checks. It does
+        // NOT bail out when the child dies -- we still want to drain any
+        // buffered output that hasn't been consumed yet.
         Request::Wait {
             settle_ms,
             timeout_ms,
@@ -278,16 +301,11 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<SessionState>>) -> bool {
 
             loop {
                 thread::sleep(Duration::from_millis(50));
-                let st = state.lock().unwrap();
-                if !st.alive {
-                    break;
-                }
-                let current_size = st.output_buf.len();
+                let current_size = state.lock().unwrap().output_buf.len();
                 if current_size != last_size {
                     last_size = current_size;
                     last_change = std::time::Instant::now();
                 }
-                drop(st);
                 if last_change.elapsed() >= settle {
                     break;
                 }
@@ -302,14 +320,20 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<SessionState>>) -> bool {
             let mut st = state.lock().unwrap();
             match other {
                 Request::Write { data } => {
-                    let bytes = data.as_bytes();
-                    let n = unsafe {
-                        libc::write(st.pty_master, bytes.as_ptr() as *const _, bytes.len())
-                    };
-                    if n < 0 {
-                        Response::error("Failed to write to PTY")
+                    if !st.alive {
+                        Response::error(
+                            "Session is no longer alive; child process has exited",
+                        )
                     } else {
-                        Response::ok(None)
+                        let bytes = data.as_bytes();
+                        let n = unsafe {
+                            libc::write(st.pty_master, bytes.as_ptr() as *const _, bytes.len())
+                        };
+                        if n < 0 {
+                            Response::error("Failed to write to PTY")
+                        } else {
+                            Response::ok(None)
+                        }
                     }
                 }
                 Request::View { color } => {
@@ -346,18 +370,24 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<SessionState>>) -> bool {
                     Response::ok(Some(text))
                 }
                 Request::Resize { cols, rows } => {
-                    let ws = libc::winsize {
-                        ws_row: rows,
-                        ws_col: cols,
-                        ws_xpixel: 0,
-                        ws_ypixel: 0,
-                    };
-                    let ret = unsafe { libc::ioctl(st.pty_master, libc::TIOCSWINSZ, &ws) };
-                    if ret < 0 {
-                        Response::error("Failed to resize PTY")
+                    if !st.alive {
+                        Response::error(
+                            "Session is no longer alive; child process has exited",
+                        )
                     } else {
-                        st.parser.set_size(rows, cols);
-                        Response::ok(None)
+                        let ws = libc::winsize {
+                            ws_row: rows,
+                            ws_col: cols,
+                            ws_xpixel: 0,
+                            ws_ypixel: 0,
+                        };
+                        let ret = unsafe { libc::ioctl(st.pty_master, libc::TIOCSWINSZ, &ws) };
+                        if ret < 0 {
+                            Response::error("Failed to resize PTY")
+                        } else {
+                            st.parser.set_size(rows, cols);
+                            Response::ok(None)
+                        }
                     }
                 }
                 Request::Status => {
@@ -365,15 +395,21 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<SessionState>>) -> bool {
                     let (rows, cols) = screen.size();
                     let title = screen.title();
                     let cursor = screen.cursor_position();
+                    let exit_line = match (&st.exit_status, st.alive) {
+                        (Some(s), _) => format!("\nexit_status: {}", s),
+                        (None, false) => "\nexit_status: unknown".to_string(),
+                        (None, true) => String::new(),
+                    };
                     let info = format!(
-                        "alive: {}\nsize: {}x{}\ncursor: ({},{})\ntitle: {}\noutput_bytes: {}",
+                        "alive: {}\nsize: {}x{}\ncursor: ({},{})\ntitle: {}\noutput_bytes: {}{}",
                         st.alive,
                         cols,
                         rows,
                         cursor.0,
                         cursor.1,
                         title,
-                        st.output_buf.len()
+                        st.output_buf.len(),
+                        exit_line,
                     );
                     Response::ok(Some(info))
                 }
@@ -385,9 +421,10 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<SessionState>>) -> bool {
                     }
                 }
                 Request::Stop => {
-                    let _ = signal::kill(st.child_pid, signal::Signal::SIGHUP);
-                    let _ = signal::kill(st.child_pid, signal::Signal::SIGTERM);
-                    st.alive = false;
+                    if st.alive {
+                        let _ = signal::kill(st.child_pid, signal::Signal::SIGHUP);
+                        let _ = signal::kill(st.child_pid, signal::Signal::SIGTERM);
+                    }
                     should_stop = true;
                     Response::ok(None)
                 }
