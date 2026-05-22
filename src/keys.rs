@@ -1,5 +1,14 @@
-/// Interpret C-style escape sequences in a string.
-/// Supports: \n \r \t \\ \e (ESC) \0 \a (BEL) \xNN (hex byte)
+/// Interpret C/shell-style escape sequences in a string.
+///
+/// Supports:
+///   - Control characters: \n \r \t \a \b \f \v \e \E \\
+///   - Null byte:          \0
+///   - Hex byte:           \xHH (1 or 2 hex digits, single raw byte)
+///   - 4-digit Unicode:    \uHHHH (encoded as UTF-8)
+///   - 8-digit Unicode:    \UHHHHHHHH (encoded as UTF-8)
+///
+/// An unrecognized backslash sequence is emitted literally (the backslash
+/// is kept, and the next character is processed normally next iteration).
 pub fn interpret_escapes(s: &str) -> Vec<u8> {
     let mut result = Vec::with_capacity(s.len());
     let bytes = s.as_bytes();
@@ -23,7 +32,7 @@ pub fn interpret_escapes(s: &str) -> Vec<u8> {
                     result.push(b'\\');
                     i += 2;
                 }
-                b'e' => {
+                b'e' | b'E' => {
                     result.push(0x1b);
                     i += 2;
                 }
@@ -35,20 +44,39 @@ pub fn interpret_escapes(s: &str) -> Vec<u8> {
                     result.push(0x07);
                     i += 2;
                 }
+                b'b' => {
+                    result.push(0x08);
+                    i += 2;
+                }
+                b'f' => {
+                    result.push(0x0c);
+                    i += 2;
+                }
+                b'v' => {
+                    result.push(0x0b);
+                    i += 2;
+                }
                 b'x' => {
                     i += 2;
                     let mut hex = String::new();
-                    if i < bytes.len() && (bytes[i] as char).is_ascii_hexdigit() {
-                        hex.push(bytes[i] as char);
-                        i += 1;
-                    }
-                    if i < bytes.len() && (bytes[i] as char).is_ascii_hexdigit() {
+                    while hex.len() < 2
+                        && i < bytes.len()
+                        && (bytes[i] as char).is_ascii_hexdigit()
+                    {
                         hex.push(bytes[i] as char);
                         i += 1;
                     }
                     if let Ok(byte) = u8::from_str_radix(&hex, 16) {
                         result.push(byte);
                     }
+                }
+                b'u' => {
+                    i += 2;
+                    consume_unicode(bytes, &mut i, 4, &mut result);
+                }
+                b'U' => {
+                    i += 2;
+                    consume_unicode(bytes, &mut i, 8, &mut result);
                 }
                 _ => {
                     result.push(b'\\');
@@ -61,6 +89,28 @@ pub fn interpret_escapes(s: &str) -> Vec<u8> {
         }
     }
     result
+}
+
+/// Read up to `max` hex digits from `bytes` starting at `*i` and, if any
+/// were read, decode them as a Unicode codepoint and append its UTF-8
+/// bytes to `out`. Invalid codepoints (e.g. surrogates) are silently
+/// skipped.
+fn consume_unicode(bytes: &[u8], i: &mut usize, max: usize, out: &mut Vec<u8>) {
+    let mut hex = String::new();
+    while hex.len() < max && *i < bytes.len() && (bytes[*i] as char).is_ascii_hexdigit() {
+        hex.push(bytes[*i] as char);
+        *i += 1;
+    }
+    if hex.is_empty() {
+        return;
+    }
+    if let Ok(cp) = u32::from_str_radix(&hex, 16)
+        && let Some(c) = char::from_u32(cp)
+    {
+        let mut buf = [0u8; 4];
+        let s = c.encode_utf8(&mut buf);
+        out.extend_from_slice(s.as_bytes());
+    }
 }
 
 /// Convert a named key to its terminal escape sequence bytes.
