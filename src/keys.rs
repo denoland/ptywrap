@@ -113,7 +113,17 @@ fn consume_unicode(bytes: &[u8], i: &mut usize, max: usize, out: &mut Vec<u8>) {
     }
 }
 
-/// Convert a named key to its terminal escape sequence bytes.
+/// Convert a named key to its terminal byte sequence.
+///
+/// Accepts:
+///   - Named keys: Enter, Tab, Escape, Space, Backspace, Delete,
+///     Up, Down, Left, Right, Home, End, PageUp, PageDown, Insert,
+///     F1..F12.
+///   - Modifier prefixes: `Ctrl-X` / `C-X` (case-insensitive) and the
+///     caret notation `^X`. `^X` covers control codes 0x00..0x1F plus
+///     `^?` (DEL, 0x7F).
+///   - Any single character (letter, digit, space, punctuation, or
+///     other single Unicode scalar) -- forwarded as-is.
 pub fn key_to_bytes(name: &str) -> Option<Vec<u8>> {
     let lower = name.to_lowercase();
     match lower.as_str() {
@@ -145,18 +155,42 @@ pub fn key_to_bytes(name: &str) -> Option<Vec<u8>> {
         "f11" => Some(b"\x1b[23~".to_vec()),
         "f12" => Some(b"\x1b[24~".to_vec()),
         _ => {
-            // ctrl-X keys
-            let stripped = lower
+            // Ctrl-X / C-X / ^X notation.
+            let ctrl = lower
                 .strip_prefix("ctrl-")
-                .or_else(|| lower.strip_prefix("c-"));
-            if let Some(ch) = stripped
+                .or_else(|| lower.strip_prefix("c-"))
+                .or_else(|| name.strip_prefix('^'));
+            if let Some(ch) = ctrl
                 && ch.len() == 1
             {
                 let c = ch.as_bytes()[0];
-                if c.is_ascii_lowercase() {
-                    return Some(vec![c - b'a' + 1]);
+                if c.is_ascii_alphabetic() {
+                    let lc = c.to_ascii_lowercase();
+                    return Some(vec![lc - b'a' + 1]);
+                }
+                // Caret notation extras: ^@ ^[ ^\ ^] ^^ ^_ ^?
+                match c {
+                    b'@' => return Some(vec![0x00]),
+                    b'[' => return Some(vec![0x1b]),
+                    b'\\' => return Some(vec![0x1c]),
+                    b']' => return Some(vec![0x1d]),
+                    b'^' => return Some(vec![0x1e]),
+                    b'_' => return Some(vec![0x1f]),
+                    b'?' => return Some(vec![0x7f]),
+                    _ => {}
                 }
             }
+
+            // Single-character key: forward the codepoint as UTF-8.
+            let mut chars = name.chars();
+            if let Some(first) = chars.next()
+                && chars.next().is_none()
+            {
+                let mut buf = [0u8; 4];
+                let s = first.encode_utf8(&mut buf);
+                return Some(s.as_bytes().to_vec());
+            }
+
             None
         }
     }
