@@ -22,11 +22,20 @@ maintains an in-memory virtual terminal (80x24 by default), and exposes a
 Unix socket at ~/.ptywrap/<session>.sock for control.
 
 Typical workflow:
-  ptywrap -s s start -- bash      # spawn bash in a fresh PTY
-  ptywrap -s s write 'ls\\n' -e   # type 'ls' + ENTER
-  ptywrap -s s view --wait        # see the rendered screen
-  ptywrap -s s send-key Ctrl-C    # interrupt
-  ptywrap -s s stop               # end the session
+  ptywrap -s s start -- bash        # spawn bash in a fresh PTY
+  ptywrap -s s write -e 'ls\\n'      # type 'ls' + ENTER (-e enables \\n)
+  ptywrap -s s view --wait          # see the rendered screen
+  ptywrap -s s send-key Ctrl-C      # interrupt
+  ptywrap -s s stop                 # end the session
+
+Input shortcuts:
+  cat foo.txt | ptywrap -s s write  # pipe a file's contents into the PTY
+  echo done    | ptywrap -s s write # read stdin when DATA is omitted or '-'
+  ptywrap -s s write -e 'hi\\n'      # -e/--escaped enables backslash
+                                    #   escapes: \\n \\r \\t \\xHH \\uHHHH ...
+  ptywrap -s s write -- --escaped   # use `--` to send DATA that starts
+                                    #   with a dash
+  ptywrap -s s send-key ^C h i      # ^X caret notation + single-char keys
 
 Session lifetime:
   A session's daemon stays alive AFTER the child command exits, so you can
