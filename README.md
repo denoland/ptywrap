@@ -33,8 +33,9 @@ ptywrap -s mysession start -- bash
 # Run a command (-e enables \n interpretation; alternative: send-key Enter)
 ptywrap -s mysession write -e 'ls -la\n'
 
-# View the terminal screen (waits for output to settle first)
-ptywrap -s mysession view --wait
+# View the terminal screen (waits for output to settle by default)
+ptywrap -s mysession view
+ptywrap -s mysession view --no-wait    # ... or skip the settle wait
 
 # Launch an interactive program directly (no `env TERM=...` needed)
 ptywrap -s mysession start -- htop
@@ -101,11 +102,12 @@ Multiple keys can be sent in one call: `send-key Up Up Enter`
 ### Output
 
 ```sh
-# View the rendered terminal screen (what a human would see)
-ptywrap -s NAME view
+# View the rendered terminal screen (what a human would see).
+# Waits for output to settle by default (no new bytes for --settle ms).
+ptywrap -s NAME view [--settle 500]
 
-# Wait for output to settle, then view
-ptywrap -s NAME view --wait [--settle 500]
+# Skip the settle wait and return the current screen immediately
+ptywrap -s NAME view --no-wait
 
 # Show raw PTY output (includes ANSI escape codes)
 ptywrap -s NAME output [--tail 100] [--wait]

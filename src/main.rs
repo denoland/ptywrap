@@ -23,8 +23,10 @@ Unix socket at ~/.ptywrap/<session>.sock for control.
 
 Typical workflow:
   ptywrap -s s start -- bash        # spawn bash in a fresh PTY
+                                    #   (TERM=xterm-256color by default)
   ptywrap -s s write -e 'ls\\n'      # type 'ls' + ENTER (-e enables \\n)
-  ptywrap -s s view --wait          # see the rendered screen
+  ptywrap -s s view                 # rendered screen (waits for settle)
+  ptywrap -s s view --no-wait       # ... or skip the settle wait
   ptywrap -s s send-key Ctrl-C      # interrupt
   ptywrap -s s stop                 # end the session
 
@@ -181,16 +183,22 @@ enum Command {
     /// Returns the current contents of the virtual terminal as plain text,
     /// preceded by a `[COLSxROWS cursor=(ROW,COL)]` header.
     ///
-    /// Combine with --wait when the program you just drove is still
-    /// painting: ptywrap will wait until no new bytes have arrived from
-    /// the child for --settle ms (default 500), or until 30s pass.
+    /// By default, view waits for the child's output to settle (no new
+    /// bytes for --settle ms, default 500) before returning, so callers
+    /// don't race the screen render after a `write`/`send-key`. Pass
+    /// --no-wait to read whatever's currently on screen, half-painted or
+    /// not. (--wait is also accepted and is a no-op now that waiting is
+    /// the default.)
     #[command(long_about, verbatim_doc_comment)]
     View {
-        /// Wait for the child's output to settle before reading the screen.
+        /// (no-op) Kept for backwards compatibility. Waiting is the default.
         #[arg(long)]
         wait: bool,
+        /// Skip the settle wait; return the current screen immediately.
+        #[arg(long, conflicts_with = "wait")]
+        no_wait: bool,
         /// Milliseconds of quiet on the PTY required before view returns.
-        /// Implies --wait. Default 500ms.
+        /// Default 500ms.
         #[arg(long)]
         settle: Option<u64>,
         /// Include ANSI color/style escape codes in the output.
@@ -395,11 +403,12 @@ fn main() -> anyhow::Result<()> {
                     send_and_print(&socket_path, &Request::Write { data: data_str })?;
                 }
                 Command::View {
-                    wait,
+                    wait: _,
+                    no_wait,
                     settle,
                     color,
                 } => {
-                    if wait || settle.is_some() {
+                    if !no_wait {
                         send_and_print(
                             &socket_path,
                             &Request::Wait {
