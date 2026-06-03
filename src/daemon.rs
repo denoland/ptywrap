@@ -17,6 +17,7 @@ use std::io::Read as _;
 use std::os::fd::FromRawFd;
 
 use crate::protocol::{Request, Response};
+use crate::queries::QueryAnswerer;
 use crate::render;
 
 const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
@@ -41,14 +42,19 @@ fn format_wait_status(status: &WaitStatus) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn start(
     session_name: &str,
     command: &[String],
     cols: u16,
     rows: u16,
     term: &str,
+    fg: &str,
+    bg: &str,
     runtime_dir: &Path,
 ) -> anyhow::Result<()> {
+    // Validate colors before forking so a typo fails loudly.
+    let answerer = QueryAnswerer::new(fg, bg)?;
     std::fs::create_dir_all(runtime_dir)?;
 
     let socket_path = runtime_dir.join(format!("{}.sock", session_name));
@@ -115,6 +121,7 @@ pub fn start(
                 cols,
                 rows,
                 term,
+                answerer,
                 status_w_raw,
             );
 
@@ -147,6 +154,7 @@ fn write_status_err(fd: i32, msg: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn daemonize_and_run(
     socket_path: &Path,
     pid_path: &Path,
@@ -154,6 +162,7 @@ fn daemonize_and_run(
     cols: u16,
     rows: u16,
     term: &str,
+    answerer: QueryAnswerer,
     status_w_fd: i32,
 ) -> anyhow::Result<()> {
     nix::unistd::setsid()?;
@@ -188,7 +197,15 @@ fn daemonize_and_run(
     match unsafe { nix::unistd::fork() }? {
         ForkResult::Parent { child } => {
             unsafe { libc::close(slave_fd) };
-            run_session(socket_path, master_fd, child, cols, rows, status_w_fd)
+            run_session(
+                socket_path,
+                master_fd,
+                child,
+                cols,
+                rows,
+                answerer,
+                status_w_fd,
+            )
         }
         ForkResult::Child => {
             unsafe { libc::close(master_fd) };
@@ -241,6 +258,7 @@ fn run_session(
     child_pid: Pid,
     cols: u16,
     rows: u16,
+    mut answerer: QueryAnswerer,
     status_w_fd: i32,
 ) -> anyhow::Result<()> {
     let state = Arc::new(Mutex::new(SessionState {
@@ -286,6 +304,12 @@ fn run_session(
                         st.output_buf.pop_front();
                     }
                     st.output_buf.push_back(byte);
+                }
+                // Answer terminal queries (cursor position, colors,
+                // device attributes) like a real terminal would.
+                let replies = answerer.scan(data, st.parser.screen().cursor_position());
+                if !replies.is_empty() {
+                    unsafe { libc::write(master_fd, replies.as_ptr() as *const _, replies.len()) };
                 }
             }
         }

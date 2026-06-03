@@ -114,6 +114,22 @@ With `--type`/`--delay` the actual inter-keystroke delay is jittered
 between 0.5x and 1.5x the average, so the cadence looks human. Escape
 sequences are never split across delays.
 
+### Terminal queries
+
+The session answers standard terminal queries from the child the way a
+real terminal would, so programs that probe their terminal at startup
+get real answers instead of assuming a dumb terminal:
+
+- `ESC[6n` (DSR) — cursor position
+- `ESC[5n` (DSR) — status report
+- `ESC[c` (DA1) — device attributes (VT220-class with ANSI color)
+- `ESC]10;?` / `ESC]11;?` (OSC) — foreground / background color,
+  configurable at start: `ptywrap -s NAME start --fg '#e0e0e0' --bg '#191d27' -- codex`
+
+The kitty keyboard protocol probe (`ESC[?u`) is deliberately left
+unanswered so programs keep sending and parsing legacy key encodings,
+which is what `write` and `send-key` synthesize.
+
 ### Output
 
 ```sh

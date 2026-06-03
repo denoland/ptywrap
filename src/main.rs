@@ -7,6 +7,7 @@ mod client;
 mod daemon;
 mod keys;
 mod protocol;
+mod queries;
 mod render;
 
 use protocol::Request;
@@ -80,6 +81,15 @@ enum Command {
     /// vim/htop/less -- run directly without an `env TERM=...` wrapper).
     /// Override with `--term`.
     ///
+    /// The session answers standard terminal queries from the child the
+    /// way a real terminal would: cursor position (DSR 6), status
+    /// (DSR 5), device attributes (DA1), and foreground/background
+    /// color (OSC 10/11, configurable via --fg/--bg). Programs use
+    /// these to unlock e.g. truecolor UI themes. The kitty keyboard
+    /// protocol probe is deliberately left unanswered so programs keep
+    /// sending/parsing legacy key encodings (which is what `write` and
+    /// `send-key` synthesize).
+    ///
     /// Fails if a session with the same name is already running. Place
     /// COMMAND and its arguments after `--` so flags meant for the child
     /// aren't consumed by ptywrap.
@@ -88,6 +98,7 @@ enum Command {
     ///   ptywrap -s s start -- bash
     ///   ptywrap -s s start --cols 120 --rows 40 -- bash -l
     ///   ptywrap -s s start --term screen-256color -- bash
+    ///   ptywrap -s s start --fg '#e0e0e0' --bg '#191d27' -- codex
     #[command(long_about, verbatim_doc_comment)]
     Start {
         /// Terminal width in columns.
@@ -99,6 +110,12 @@ enum Command {
         /// Value of the TERM environment variable for the child.
         #[arg(long, default_value = "xterm-256color")]
         term: String,
+        /// Foreground color (#rrggbb) reported for OSC 10 queries.
+        #[arg(long, default_value = "#ffffff", value_name = "COLOR")]
+        fg: String,
+        /// Background color (#rrggbb) reported for OSC 11 queries.
+        #[arg(long, default_value = "#000000", value_name = "COLOR")]
+        bg: String,
         /// Command and arguments to run, after `--`.
         #[arg(last = true, required = true)]
         command: Vec<String>,
@@ -386,10 +403,12 @@ fn main() -> anyhow::Result<()> {
             cols,
             rows,
             term,
+            fg,
+            bg,
             command,
         } => {
             let session = require_session(cli.session)?;
-            daemon::start(&session, &command, cols, rows, &term, &dir)?;
+            daemon::start(&session, &command, cols, rows, &term, &fg, &bg, &dir)?;
         }
         cmd => {
             let session = require_session(cli.session)?;
