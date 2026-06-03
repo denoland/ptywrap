@@ -133,12 +133,19 @@ enum Command {
     /// To send special keys (arrow keys, function keys, Ctrl-X), prefer
     /// `send-key`, which knows the right escape sequences.
     ///
+    /// With --type (or --delay), DATA is not pasted in one write but
+    /// "typed": one character at a time, with a randomized delay between
+    /// keystrokes (default ~50ms, jittered so the cadence looks human,
+    /// like vhs's Type). Escape sequences in DATA are never split.
+    ///
     /// Examples:
     ///   ptywrap -s s write 'ls -la'           # 6 bytes, no newline
     ///   ptywrap -s s write -e 'ls -la\n'      # types 'ls -la' + ENTER
     ///   ptywrap -s s write -e 'snowman: ☃\n'
     ///   echo 'ls -la' | ptywrap -s s write    # reads from stdin
     ///   ptywrap -s s write -- --escaped       # sends literal text "--escaped"
+    ///   ptywrap -s s write --type 'hello'     # simulate human typing
+    ///   ptywrap -s s write --delay 120 'slow' # ... slower (120ms/keystroke)
     #[command(long_about, verbatim_doc_comment)]
     Write {
         /// Text to write. Omit or pass `-` to read from stdin.
@@ -146,6 +153,15 @@ enum Command {
         /// Interpret C-style escape sequences in DATA.
         #[arg(short = 'e', long = "escaped")]
         escaped: bool,
+        /// Simulate human typing: send one character at a time with a
+        /// randomized inter-keystroke delay instead of pasting.
+        #[arg(long = "type")]
+        type_: bool,
+        /// Average milliseconds between simulated keystrokes (implies
+        /// --type). Default 50. The actual delay is jittered between
+        /// 0.5x and 1.5x this value.
+        #[arg(long, value_name = "MS")]
+        delay: Option<u64>,
     },
 
     /// Send named keys (or single characters) to the PTY.
@@ -169,6 +185,12 @@ enum Command {
     /// Multiple arguments are concatenated in order, so:
     ///   ptywrap -s s send-key h i Space w o r l d Enter
     ///
+    /// With --type (or --delay), the keys are not sent in one write but
+    /// "typed" with a randomized delay between keystrokes (default
+    /// ~50ms, jittered). Each argument counts as one keystroke:
+    ///   ptywrap -s s send-key --type h i Space t h e r e Enter
+    ///   ptywrap -s s send-key --delay 200 Up Up Enter
+    ///
     /// Unknown multi-character names error out so typos aren't silently
     /// turned into nothing.
     #[command(long_about, verbatim_doc_comment)]
@@ -176,6 +198,15 @@ enum Command {
         /// Key names (and/or single characters) to send, in order.
         #[arg(required = true)]
         keys: Vec<String>,
+        /// Simulate human typing: send each key separately with a
+        /// randomized inter-keystroke delay.
+        #[arg(long = "type")]
+        type_: bool,
+        /// Average milliseconds between simulated keystrokes (implies
+        /// --type). Default 50. The actual delay is jittered between
+        /// 0.5x and 1.5x this value.
+        #[arg(long, value_name = "MS")]
+        delay: Option<u64>,
     },
 
     /// Show the rendered terminal screen (what a human would see).
@@ -365,7 +396,12 @@ fn main() -> anyhow::Result<()> {
             let socket_path = dir.join(format!("{}.sock", session));
 
             match cmd {
-                Command::Write { data, escaped } => {
+                Command::Write {
+                    data,
+                    escaped,
+                    type_,
+                    delay,
+                } => {
                     let raw: Vec<u8> = match data.as_deref() {
                         Some("-") => read_stdin_bytes()?,
                         Some(s) => s.as_bytes().to_vec(),
@@ -388,19 +424,50 @@ fn main() -> anyhow::Result<()> {
                     };
                     let data_str = String::from_utf8(bytes)
                         .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
-                    send_and_print(&socket_path, &Request::Write { data: data_str })?;
+                    if type_ || delay.is_some() {
+                        send_and_print(
+                            &socket_path,
+                            &Request::WriteChunks {
+                                chunks: keys::split_typing_chunks(&data_str),
+                                delay_ms: delay.unwrap_or(50),
+                            },
+                        )?;
+                    } else {
+                        send_and_print(&socket_path, &Request::Write { data: data_str })?;
+                    }
                 }
-                Command::SendKey { keys: key_names } => {
-                    let mut all_bytes = Vec::new();
+                Command::SendKey {
+                    keys: key_names,
+                    type_,
+                    delay,
+                } => {
+                    let mut chunks = Vec::with_capacity(key_names.len());
                     for name in &key_names {
                         match keys::key_to_bytes(name) {
-                            Some(bytes) => all_bytes.extend(bytes),
+                            Some(bytes) => {
+                                chunks.push(String::from_utf8(bytes).unwrap_or_else(|e| {
+                                    String::from_utf8_lossy(e.as_bytes()).to_string()
+                                }))
+                            }
                             None => anyhow::bail!("Unknown key: {}", name),
                         }
                     }
-                    let data_str = String::from_utf8(all_bytes)
-                        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
-                    send_and_print(&socket_path, &Request::Write { data: data_str })?;
+                    if type_ || delay.is_some() {
+                        send_and_print(
+                            &socket_path,
+                            &Request::WriteChunks {
+                                chunks,
+                                delay_ms: delay.unwrap_or(50),
+                            },
+                        )?;
+                    } else {
+                        send_and_print(
+                            &socket_path,
+                            &Request::Write {
+                                data: chunks.concat(),
+                            },
+                        )?;
+                    }
                 }
                 Command::View {
                     wait: _,

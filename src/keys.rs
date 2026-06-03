@@ -111,6 +111,49 @@ fn consume_unicode(bytes: &[u8], i: &mut usize, max: usize, out: &mut Vec<u8>) {
     }
 }
 
+/// Split text into "keystroke" chunks for simulated typing.
+///
+/// Each chunk is what one key press would produce: normally a single
+/// character, but a complete escape sequence (e.g. an arrow key's
+/// `\x1b[A` or F1's `\x1bOP`) is kept whole so a delay is never
+/// inserted in the middle of it -- a partial escape sequence would be
+/// misparsed by the receiving program as a bare ESC plus stray text.
+pub fn split_typing_chunks(s: &str) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            chunks.push(c.to_string());
+            continue;
+        }
+        let mut seq = String::from(c);
+        match chars.peek() {
+            // CSI: ESC [ params/intermediates... final byte 0x40-0x7E
+            Some('[') => {
+                seq.push(chars.next().unwrap());
+                for n in chars.by_ref() {
+                    seq.push(n);
+                    if ('\u{40}'..='\u{7e}').contains(&n) {
+                        break;
+                    }
+                }
+            }
+            // SS3: ESC O + one char (F1-F4, application cursor keys)
+            Some('O') => {
+                seq.push(chars.next().unwrap());
+                if let Some(n) = chars.next() {
+                    seq.push(n);
+                }
+            }
+            // ESC + one char (alt-X etc.)
+            Some(_) => seq.push(chars.next().unwrap()),
+            None => {}
+        }
+        chunks.push(seq);
+    }
+    chunks
+}
+
 /// Convert a named key to its terminal byte sequence.
 ///
 /// Accepts:
@@ -191,5 +234,40 @@ pub fn key_to_bytes(name: &str) -> Option<Vec<u8>> {
 
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_plain_text() {
+        assert_eq!(split_typing_chunks("hi ☃"), vec!["h", "i", " ", "☃"]);
+    }
+
+    #[test]
+    fn split_keeps_csi_whole() {
+        // Up arrow, then 'x'
+        assert_eq!(split_typing_chunks("\x1b[Ax"), vec!["\x1b[A", "x"]);
+        // Multi-byte CSI with parameters (F5)
+        assert_eq!(split_typing_chunks("\x1b[15~y"), vec!["\x1b[15~", "y"]);
+    }
+
+    #[test]
+    fn split_keeps_ss3_whole() {
+        // F1, then 'z'
+        assert_eq!(split_typing_chunks("\x1bOPz"), vec!["\x1bOP", "z"]);
+    }
+
+    #[test]
+    fn split_alt_key() {
+        // Alt-f style: ESC + one char
+        assert_eq!(split_typing_chunks("\x1bfg"), vec!["\x1bf", "g"]);
+    }
+
+    #[test]
+    fn split_trailing_esc() {
+        assert_eq!(split_typing_chunks("a\x1b"), vec!["a", "\x1b"]);
     }
 }

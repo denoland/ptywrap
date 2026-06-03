@@ -404,6 +404,48 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<SessionState>>) -> bool {
             }
             Response::ok(None)
         }
+        // WriteChunks (simulated typing) also sleeps with the lock released
+        // so the reader thread can process the echo while we "type" --
+        // otherwise the screen would only update once at the end.
+        Request::WriteChunks { chunks, delay_ms } => {
+            let (fd, alive) = {
+                let st = state.lock().unwrap();
+                (st.pty_master, st.alive)
+            };
+            if !alive {
+                Response::error("Session is no longer alive; child process has exited")
+            } else {
+                // xorshift PRNG for keystroke jitter; seeded from the clock.
+                let mut seed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos() as u64)
+                    .unwrap_or(0x9e3779b9)
+                    | 1;
+                let mut failed = false;
+                for (i, chunk) in chunks.iter().enumerate() {
+                    if i > 0 && delay_ms > 0 {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        // Uniform in [delay/2, 3*delay/2): human-ish cadence
+                        // rather than a metronomic (paste-like) one.
+                        let ms = delay_ms / 2 + seed % delay_ms;
+                        thread::sleep(Duration::from_millis(ms));
+                    }
+                    let bytes = chunk.as_bytes();
+                    let n = unsafe { libc::write(fd, bytes.as_ptr() as *const _, bytes.len()) };
+                    if n < 0 {
+                        failed = true;
+                        break;
+                    }
+                }
+                if failed {
+                    Response::error("Failed to write to PTY")
+                } else {
+                    Response::ok(None)
+                }
+            }
+        }
         // All other requests hold the lock for the duration
         other => {
             let mut st = state.lock().unwrap();
@@ -524,7 +566,7 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<SessionState>>) -> bool {
                     should_stop = true;
                     Response::ok(None)
                 }
-                Request::Wait { .. } => unreachable!(),
+                Request::Wait { .. } | Request::WriteChunks { .. } => unreachable!(),
             }
         }
     };

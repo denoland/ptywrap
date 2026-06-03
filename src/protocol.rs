@@ -6,6 +6,14 @@ pub enum Request {
     Write {
         data: String,
     },
+    /// Simulated typing: write each chunk separately with a randomized
+    /// delay (centered on `delay_ms`) between chunks. A chunk is one
+    /// keystroke -- a single character, or a complete escape sequence
+    /// that must not be split (e.g. an arrow key's `\x1b[A`).
+    WriteChunks {
+        chunks: Vec<String>,
+        delay_ms: u64,
+    },
     View {
         color: bool,
     },

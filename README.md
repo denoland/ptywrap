@@ -98,9 +98,21 @@ ptywrap -s NAME send-key F1 F2 ... F12
 
 # Single-character arguments are sent as-is (letters, digits, punctuation)
 ptywrap -s NAME send-key h i Space w o r l d Enter
+
+# Simulate human typing (like vhs's Type): one keystroke at a time with
+# a jittered delay, instead of pasting everything in one write. Useful
+# when recording demos so input doesn't appear instantaneously.
+ptywrap -s NAME write --type -e 'echo hello\n'   # ~50ms per keystroke
+ptywrap -s NAME write --delay 120 'slow typing'  # ~120ms per keystroke
+ptywrap -s NAME send-key --type h i Enter        # also works for keys
+ptywrap -s NAME send-key --delay 200 Up Up Enter
 ```
 
 Multiple keys can be sent in one call: `send-key Up Up Enter`
+
+With `--type`/`--delay` the actual inter-keystroke delay is jittered
+between 0.5x and 1.5x the average, so the cadence looks human. Escape
+sequences are never split across delays.
 
 ### Output
 
